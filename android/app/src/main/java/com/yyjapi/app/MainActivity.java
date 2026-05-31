@@ -7,6 +7,7 @@ import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
@@ -68,6 +69,16 @@ public class MainActivity extends BridgeActivity {
     private static final String GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/%s/releases/latest";
     private static final String GITHUB_DOWNLOAD_PROXY_PREFIX = "https://ghfast.top/";
     private static final String UPDATE_APK_MIME_TYPE = "application/vnd.android.package-archive";
+    private static final String UPDATE_PREFS = "yyjapi_update";
+    private static final String PREF_DOWNLOAD_ID = "download_id";
+    private static final String PREF_APK_PATH = "apk_path";
+    private static final String PREF_VERSION = "version";
+    private static final String PREF_RELEASE_NAME = "release_name";
+    private static final String PREF_RELEASE_NOTES = "release_notes";
+    private static final String PREF_APK_NAME = "apk_name";
+    private static final String PREF_APK_URL = "apk_url";
+    private static final String PREF_FALLBACK_URL = "fallback_url";
+    private static final int UPDATE_DOWNLOAD_POLL_INTERVAL_MS = 1500;
     private static final int[] RETRY_DELAYS_MS = { 1000, 2000, 4000, 8000, 15000, 30000 };
     private static final Set<String> APP_HOSTS = new HashSet<>(
         Arrays.asList("yyjapi.com", "www.yyjapi.com", "cf.yyjapi.com")
@@ -205,6 +216,8 @@ public class MainActivity extends BridgeActivity {
     private UpdateInfo pendingUpdateInfo;
     private String pendingUpdateFallbackUrl;
     private BroadcastReceiver updateDownloadReceiver;
+    private Runnable pendingUpdatePollRunnable;
+    private boolean installPermissionPromptShowing = false;
 
     private static class UpdateInfo {
         final String version;
@@ -229,6 +242,8 @@ public class MainActivity extends BridgeActivity {
         configureWebView();
         configureBackButtonHandling();
         handleIncomingIntent(getIntent());
+        restorePendingUpdateState();
+        checkPendingUpdateDownload();
         checkForAppUpdate();
     }
 
@@ -406,12 +421,14 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
+        checkPendingUpdateDownload();
         maybeInstallPendingUpdate();
     }
 
     @Override
     public void onDestroy() {
         cancelScheduledRetry();
+        cancelUpdateDownloadPoll();
         unregisterUpdateDownloadReceiver();
         super.onDestroy();
     }
@@ -724,6 +741,8 @@ public class MainActivity extends BridgeActivity {
             pendingUpdateInfo = updateInfo;
             pendingUpdateFallbackUrl = fallbackUrl;
             pendingUpdateDownloadId = downloadManager.enqueue(request);
+            savePendingUpdateState();
+            scheduleUpdateDownloadPoll();
             Toast.makeText(this, "已开始下载更新", Toast.LENGTH_SHORT).show();
         } catch (Exception e) {
             Log.w(TAG, "Could not start update download", e);
@@ -759,7 +778,7 @@ public class MainActivity extends BridgeActivity {
 
         IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(updateDownloadReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            registerReceiver(updateDownloadReceiver, filter, Context.RECEIVER_EXPORTED);
         } else {
             registerReceiver(updateDownloadReceiver, filter);
         }
@@ -774,17 +793,25 @@ public class MainActivity extends BridgeActivity {
         DownloadManager.Query query = new DownloadManager.Query().setFilterById(downloadId);
         try (Cursor cursor = downloadManager.query(query)) {
             if (cursor == null || !cursor.moveToFirst()) {
-                Toast.makeText(this, "更新下载状态未知", Toast.LENGTH_SHORT).show();
+                if (isPendingUpdateApkReady()) {
+                    maybeInstallPendingUpdate();
+                    return;
+                }
+                scheduleUpdateDownloadPoll();
                 return;
             }
 
             int statusIndex = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS);
             int status = statusIndex >= 0 ? cursor.getInt(statusIndex) : DownloadManager.STATUS_FAILED;
             if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                cancelUpdateDownloadPoll();
+                updatePendingApkFileFromDownload(cursor);
                 pendingUpdateFallbackUrl = null;
+                savePendingUpdateState();
                 Toast.makeText(this, "更新下载完成", Toast.LENGTH_SHORT).show();
                 maybeInstallPendingUpdate();
             } else if (status == DownloadManager.STATUS_FAILED) {
+                cancelUpdateDownloadPoll();
                 if (pendingUpdateInfo != null && pendingUpdateFallbackUrl != null) {
                     String fallbackUrl = pendingUpdateFallbackUrl;
                     pendingUpdateFallbackUrl = null;
@@ -792,11 +819,78 @@ public class MainActivity extends BridgeActivity {
                     startUpdateDownload(pendingUpdateInfo, fallbackUrl, null);
                     return;
                 }
+                clearPendingUpdateState();
                 Toast.makeText(this, "更新下载失败", Toast.LENGTH_SHORT).show();
+            } else {
+                scheduleUpdateDownloadPoll();
             }
         } catch (Exception e) {
             Log.w(TAG, "Could not inspect update download", e);
+            scheduleUpdateDownloadPoll();
         }
+    }
+
+    private void checkPendingUpdateDownload() {
+        restorePendingUpdateState();
+        if (isPendingUpdateApkReady()) {
+            maybeInstallPendingUpdate();
+            return;
+        }
+
+        if (pendingUpdateDownloadId == -1L) {
+            return;
+        }
+
+        handleUpdateDownloadComplete(pendingUpdateDownloadId);
+    }
+
+    private void scheduleUpdateDownloadPoll() {
+        if (pendingUpdateDownloadId == -1L) {
+            return;
+        }
+
+        cancelUpdateDownloadPoll();
+        pendingUpdatePollRunnable = () -> {
+            pendingUpdatePollRunnable = null;
+            if (pendingUpdateDownloadId != -1L) {
+                handleUpdateDownloadComplete(pendingUpdateDownloadId);
+            }
+        };
+        retryHandler.postDelayed(pendingUpdatePollRunnable, UPDATE_DOWNLOAD_POLL_INTERVAL_MS);
+    }
+
+    private void cancelUpdateDownloadPoll() {
+        if (pendingUpdatePollRunnable == null) {
+            return;
+        }
+
+        retryHandler.removeCallbacks(pendingUpdatePollRunnable);
+        pendingUpdatePollRunnable = null;
+    }
+
+    private void updatePendingApkFileFromDownload(Cursor cursor) {
+        int localUriIndex = cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI);
+        if (localUriIndex < 0) {
+            return;
+        }
+
+        String localUri = cursor.getString(localUriIndex);
+        if (localUri == null || localUri.isEmpty()) {
+            return;
+        }
+
+        try {
+            Uri uri = Uri.parse(localUri);
+            if ("file".equals(uri.getScheme()) && uri.getPath() != null) {
+                pendingUpdateApkFile = new File(uri.getPath());
+            }
+        } catch (Exception ignored) {
+            // Keep the file path we chose before enqueueing the download.
+        }
+    }
+
+    private boolean isPendingUpdateApkReady() {
+        return pendingUpdateApkFile != null && pendingUpdateApkFile.exists() && pendingUpdateApkFile.length() > 0;
     }
 
     private void maybeInstallPendingUpdate() {
@@ -813,14 +907,19 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void promptForInstallPermission() {
+        if (installPermissionPromptShowing) {
+            return;
+        }
+
         if (isFinishing() || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && isDestroyed())) {
             return;
         }
 
-        new AlertDialog.Builder(this)
+        installPermissionPromptShowing = true;
+        AlertDialog dialog = new AlertDialog.Builder(this)
             .setTitle("需要安装权限")
-            .setMessage("请允许优易接API安装应用更新，然后返回 App 继续安装。")
-            .setPositiveButton("去开启", (dialog, which) -> {
+            .setMessage("下载已完成。请允许优易接API安装应用更新，然后返回 App，安装器会继续打开。")
+            .setPositiveButton("去开启", (buttonDialog, which) -> {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     Intent intent = new Intent(
                         Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
@@ -830,10 +929,31 @@ public class MainActivity extends BridgeActivity {
                 }
             })
             .setNegativeButton("稍后", null)
-            .show();
+            .create();
+        dialog.setOnDismissListener(ignored -> installPermissionPromptShowing = false);
+        dialog.show();
     }
 
     private void installUpdateApk(File apkFile) {
+        try {
+            Uri apkUri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", apkFile);
+            Intent intent = new Intent(Intent.ACTION_INSTALL_PACKAGE);
+            intent.setDataAndType(apkUri, UPDATE_APK_MIME_TYPE);
+            intent.putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true);
+            intent.putExtra(Intent.EXTRA_RETURN_RESULT, true);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+            clearPendingUpdateState();
+        } catch (ActivityNotFoundException e) {
+            openUpdateApkWithViewIntent(apkFile);
+        } catch (Exception e) {
+            Log.w(TAG, "Could not install update APK", e);
+            Toast.makeText(this, "无法打开更新安装包", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void openUpdateApkWithViewIntent(File apkFile) {
         try {
             Uri apkUri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", apkFile);
             Intent intent = new Intent(Intent.ACTION_VIEW);
@@ -841,15 +961,10 @@ public class MainActivity extends BridgeActivity {
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(intent);
-            pendingUpdateApkFile = null;
-            pendingUpdateInfo = null;
-            pendingUpdateFallbackUrl = null;
-            pendingUpdateDownloadId = -1L;
-        } catch (ActivityNotFoundException e) {
-            Toast.makeText(this, "没有找到可用的安装器", Toast.LENGTH_SHORT).show();
+            clearPendingUpdateState();
         } catch (Exception e) {
-            Log.w(TAG, "Could not install update APK", e);
-            Toast.makeText(this, "无法打开更新安装包", Toast.LENGTH_SHORT).show();
+            Log.w(TAG, "Could not open update APK with view intent", e);
+            Toast.makeText(this, "没有找到可用的安装器", Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -865,6 +980,71 @@ public class MainActivity extends BridgeActivity {
         } finally {
             updateDownloadReceiver = null;
         }
+    }
+
+    private void savePendingUpdateState() {
+        SharedPreferences.Editor editor = getSharedPreferences(UPDATE_PREFS, MODE_PRIVATE).edit();
+        editor.putLong(PREF_DOWNLOAD_ID, pendingUpdateDownloadId);
+        editor.putString(PREF_APK_PATH, pendingUpdateApkFile == null ? "" : pendingUpdateApkFile.getAbsolutePath());
+        editor.putString(PREF_FALLBACK_URL, pendingUpdateFallbackUrl == null ? "" : pendingUpdateFallbackUrl);
+
+        if (pendingUpdateInfo == null) {
+            editor.putString(PREF_VERSION, "");
+            editor.putString(PREF_RELEASE_NAME, "");
+            editor.putString(PREF_RELEASE_NOTES, "");
+            editor.putString(PREF_APK_NAME, "");
+            editor.putString(PREF_APK_URL, "");
+        } else {
+            editor.putString(PREF_VERSION, pendingUpdateInfo.version == null ? "" : pendingUpdateInfo.version);
+            editor.putString(PREF_RELEASE_NAME, pendingUpdateInfo.releaseName == null ? "" : pendingUpdateInfo.releaseName);
+            editor.putString(PREF_RELEASE_NOTES, pendingUpdateInfo.releaseNotes == null ? "" : pendingUpdateInfo.releaseNotes);
+            editor.putString(PREF_APK_NAME, pendingUpdateInfo.apkName == null ? "" : pendingUpdateInfo.apkName);
+            editor.putString(PREF_APK_URL, pendingUpdateInfo.apkUrl == null ? "" : pendingUpdateInfo.apkUrl);
+        }
+
+        editor.apply();
+    }
+
+    private void restorePendingUpdateState() {
+        if (pendingUpdateDownloadId != -1L || pendingUpdateApkFile != null) {
+            return;
+        }
+
+        SharedPreferences preferences = getSharedPreferences(UPDATE_PREFS, MODE_PRIVATE);
+        long downloadId = preferences.getLong(PREF_DOWNLOAD_ID, -1L);
+        String apkPath = preferences.getString(PREF_APK_PATH, "");
+        if (downloadId == -1L && (apkPath == null || apkPath.isEmpty())) {
+            return;
+        }
+
+        pendingUpdateDownloadId = downloadId;
+        if (apkPath != null && !apkPath.isEmpty()) {
+            pendingUpdateApkFile = new File(apkPath);
+        }
+
+        String version = preferences.getString(PREF_VERSION, "");
+        String apkUrl = preferences.getString(PREF_APK_URL, "");
+        if ((version != null && !version.isEmpty()) || (apkUrl != null && !apkUrl.isEmpty())) {
+            pendingUpdateInfo = new UpdateInfo(
+                version,
+                preferences.getString(PREF_RELEASE_NAME, ""),
+                preferences.getString(PREF_RELEASE_NOTES, ""),
+                preferences.getString(PREF_APK_NAME, ""),
+                apkUrl
+            );
+        }
+
+        String fallbackUrl = preferences.getString(PREF_FALLBACK_URL, "");
+        pendingUpdateFallbackUrl = fallbackUrl == null || fallbackUrl.isEmpty() ? null : fallbackUrl;
+    }
+
+    private void clearPendingUpdateState() {
+        cancelUpdateDownloadPoll();
+        pendingUpdateDownloadId = -1L;
+        pendingUpdateApkFile = null;
+        pendingUpdateInfo = null;
+        pendingUpdateFallbackUrl = null;
+        getSharedPreferences(UPDATE_PREFS, MODE_PRIVATE).edit().clear().apply();
     }
 
     private String readResponseBody(InputStream inputStream) throws Exception {

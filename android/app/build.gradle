@@ -21,8 +21,8 @@ android {
         applicationId "com.yyjapi.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 8
-        versionName "1.0.7"
+        versionCode 9
+        versionName "1.0.8"
         buildConfigField "String", "GITHUB_RELEASE_REPO", "\"${escapeBuildConfigString(githubReleaseRepo)}\""
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
