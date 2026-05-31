@@ -21,8 +21,8 @@ android {
         applicationId "com.yyjapi.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 6
-        versionName "1.0.5"
+        versionCode 7
+        versionName "1.0.6"
         buildConfigField "String", "GITHUB_RELEASE_REPO", "\"${escapeBuildConfigString(githubReleaseRepo)}\""
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
@@ -31,9 +31,21 @@ android {
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        yyjapiDebug {
+            storeFile file('yyjapi-debug-signing.store')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
     buildTypes {
+        debug {
+            signingConfig signingConfigs.yyjapiDebug
+        }
         release {
             minifyEnabled false
+            signingConfig signingConfigs.yyjapiDebug
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
