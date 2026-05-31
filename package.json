@@ -1,0 +1,21 @@
+{
+  "name": "yyjapi-capacitor-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Capacitor Android WebView shell for yyjapi.com",
+  "scripts": {
+    "sync": "cap sync android",
+    "open:android": "cap open android",
+    "build:android": "cd android && gradlew.bat assembleDebug"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.4.4",
+    "@capacitor/app": "^7.1.0",
+    "@capacitor/browser": "^7.0.2",
+    "@capacitor/core": "^7.4.4"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.4.4",
+    "typescript": "^6.0.3"
+  }
+}

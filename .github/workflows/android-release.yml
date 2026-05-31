@@ -1,0 +1,68 @@
+name: Android Release APK
+
+on:
+  push:
+    tags:
+      - v*
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Release tag, for example v1.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-debug-apk:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag_name || github.ref_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Sync Capacitor Android project
+        run: npx cap sync android
+
+      - name: Build debug APK
+        working-directory: android
+        run: |
+          rm -f local.properties
+          chmod +x gradlew
+          ./gradlew assembleDebug -PYYJAPI_GITHUB_RELEASE_REPO="${GITHUB_REPOSITORY}" --no-daemon
+
+      - name: Upload APK to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SAFE_TAG="${RELEASE_TAG//\//-}"
+          APK_NAME="yyjapi-app-${SAFE_TAG}-debug.apk"
+          cp android/app/build/outputs/apk/debug/app-debug.apk "${APK_NAME}"
+          if ! gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release create "${RELEASE_TAG}" --title "${RELEASE_TAG}" --notes "Debug APK for ${RELEASE_TAG}"
+          fi
+          gh release upload "${RELEASE_TAG}" "${APK_NAME}" --clobber

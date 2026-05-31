@@ -1,0 +1,15 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls",
+      "delegate_permission/common.get_login_creds"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.yyjapi.app",
+      "sha256_cert_fingerprints": [
+        "84:0F:DF:A7:F9:DC:56:DB:EB:0D:69:A5:BA:13:44:A1:6A:14:45:84:E7:52:B0:11:FE:68:6B:39:8A:A5:E7:D0"
+      ]
+    }
+  }
+]

@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">优易接API</string>
+    <string name="title_activity_main">优易接API</string>
+    <string name="package_name">com.yyjapi.app</string>
+    <string name="custom_url_scheme">com.yyjapi.app</string>
+    <string name="asset_statements" translatable="false">[{\&quot;include\&quot;:\&quot;https://www.yyjapi.com/.well-known/assetlinks.json\&quot;},{\&quot;include\&quot;:\&quot;https://yyjapi.com/.well-known/assetlinks.json\&quot;}]</string>
+</resources>
