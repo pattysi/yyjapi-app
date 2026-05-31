@@ -66,6 +66,7 @@ public class MainActivity extends BridgeActivity {
     private static final String TAG = "YYJAPI";
     private static final String HOME_URL = "https://www.yyjapi.com";
     private static final String GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/%s/releases/latest";
+    private static final String GITHUB_DOWNLOAD_PROXY_PREFIX = "https://v4.gh-proxy.org/";
     private static final String UPDATE_APK_MIME_TYPE = "application/vnd.android.package-archive";
     private static final int[] RETRY_DELAYS_MS = { 1000, 2000, 4000, 8000, 15000, 30000 };
     private static final Set<String> APP_HOSTS = new HashSet<>(
@@ -201,6 +202,8 @@ public class MainActivity extends BridgeActivity {
     private Runnable pendingRetryRunnable;
     private long pendingUpdateDownloadId = -1L;
     private File pendingUpdateApkFile;
+    private UpdateInfo pendingUpdateInfo;
+    private String pendingUpdateFallbackUrl;
     private BroadcastReceiver updateDownloadReceiver;
 
     private static class UpdateInfo {
@@ -653,6 +656,7 @@ public class MainActivity extends BridgeActivity {
         StringBuilder message = new StringBuilder();
         message.append("当前版本：").append(getCurrentVersionName()).append("\n");
         message.append("最新版本：").append(updateInfo.version);
+        message.append("\n\n默认使用镜像下载，速度慢时也可以改用直连。");
         if (updateInfo.releaseNotes != null && !updateInfo.releaseNotes.trim().isEmpty()) {
             message.append("\n\n").append(updateInfo.releaseNotes.trim());
         }
@@ -660,13 +664,25 @@ public class MainActivity extends BridgeActivity {
         new AlertDialog.Builder(this)
             .setTitle("发现新版本")
             .setMessage(message.toString())
-            .setPositiveButton("下载更新", (dialog, which) -> downloadUpdate(updateInfo))
+            .setPositiveButton("镜像下载", (dialog, which) -> downloadUpdate(updateInfo, true))
+            .setNeutralButton("直连下载", (dialog, which) -> downloadUpdate(updateInfo, false))
             .setNegativeButton("稍后", null)
             .show();
     }
 
-    private void downloadUpdate(UpdateInfo updateInfo) {
+    private void downloadUpdate(UpdateInfo updateInfo, boolean preferMirror) {
         if (updateInfo == null || updateInfo.apkUrl == null || updateInfo.apkUrl.isEmpty()) {
+            Toast.makeText(this, "没有找到可下载的 APK", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        String downloadUrl = preferMirror ? getMirroredGithubDownloadUrl(updateInfo.apkUrl) : updateInfo.apkUrl;
+        String fallbackUrl = preferMirror && !downloadUrl.equals(updateInfo.apkUrl) ? updateInfo.apkUrl : null;
+        startUpdateDownload(updateInfo, downloadUrl, fallbackUrl);
+    }
+
+    private void startUpdateDownload(UpdateInfo updateInfo, String downloadUrl, String fallbackUrl) {
+        if (downloadUrl == null || downloadUrl.isEmpty()) {
             Toast.makeText(this, "没有找到可下载的 APK", Toast.LENGTH_SHORT).show();
             return;
         }
@@ -689,7 +705,7 @@ public class MainActivity extends BridgeActivity {
                 Log.w(TAG, "Could not delete existing update APK: " + outputFile);
             }
 
-            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(updateInfo.apkUrl));
+            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(downloadUrl));
             request.setTitle("优易接API 更新");
             request.setDescription("正在下载 " + updateInfo.version);
             request.setMimeType(UPDATE_APK_MIME_TYPE);
@@ -705,10 +721,17 @@ public class MainActivity extends BridgeActivity {
 
             registerUpdateDownloadReceiver();
             pendingUpdateApkFile = outputFile;
+            pendingUpdateInfo = updateInfo;
+            pendingUpdateFallbackUrl = fallbackUrl;
             pendingUpdateDownloadId = downloadManager.enqueue(request);
             Toast.makeText(this, "已开始下载更新", Toast.LENGTH_SHORT).show();
         } catch (Exception e) {
             Log.w(TAG, "Could not start update download", e);
+            if (fallbackUrl != null) {
+                Toast.makeText(this, "镜像下载不可用，正在改用直连", Toast.LENGTH_SHORT).show();
+                startUpdateDownload(updateInfo, fallbackUrl, null);
+                return;
+            }
             Toast.makeText(this, "下载更新失败", Toast.LENGTH_SHORT).show();
         }
     }
@@ -758,9 +781,17 @@ public class MainActivity extends BridgeActivity {
             int statusIndex = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS);
             int status = statusIndex >= 0 ? cursor.getInt(statusIndex) : DownloadManager.STATUS_FAILED;
             if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                pendingUpdateFallbackUrl = null;
                 Toast.makeText(this, "更新下载完成", Toast.LENGTH_SHORT).show();
                 maybeInstallPendingUpdate();
             } else if (status == DownloadManager.STATUS_FAILED) {
+                if (pendingUpdateInfo != null && pendingUpdateFallbackUrl != null) {
+                    String fallbackUrl = pendingUpdateFallbackUrl;
+                    pendingUpdateFallbackUrl = null;
+                    Toast.makeText(this, "镜像下载失败，正在改用直连", Toast.LENGTH_SHORT).show();
+                    startUpdateDownload(pendingUpdateInfo, fallbackUrl, null);
+                    return;
+                }
                 Toast.makeText(this, "更新下载失败", Toast.LENGTH_SHORT).show();
             }
         } catch (Exception e) {
@@ -811,6 +842,8 @@ public class MainActivity extends BridgeActivity {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(intent);
             pendingUpdateApkFile = null;
+            pendingUpdateInfo = null;
+            pendingUpdateFallbackUrl = null;
             pendingUpdateDownloadId = -1L;
         } catch (ActivityNotFoundException e) {
             Toast.makeText(this, "没有找到可用的安装器", Toast.LENGTH_SHORT).show();
@@ -971,6 +1004,16 @@ public class MainActivity extends BridgeActivity {
     private String sanitizeFilePart(String value) {
         String sanitized = value == null ? "" : value.replaceAll("[^A-Za-z0-9._-]", "_");
         return sanitized.isEmpty() ? "yyjapi-update.apk" : sanitized;
+    }
+
+    private String getMirroredGithubDownloadUrl(String downloadUrl) {
+        if (downloadUrl == null || downloadUrl.isEmpty() || downloadUrl.startsWith(GITHUB_DOWNLOAD_PROXY_PREFIX)) {
+            return downloadUrl;
+        }
+
+        return downloadUrl.startsWith("https://github.com/")
+            ? GITHUB_DOWNLOAD_PROXY_PREFIX + downloadUrl
+            : downloadUrl;
     }
 
     private boolean isHttpOrHttps(Uri uri) {
