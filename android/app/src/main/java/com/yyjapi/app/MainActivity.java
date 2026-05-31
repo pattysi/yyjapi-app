@@ -66,7 +66,7 @@ public class MainActivity extends BridgeActivity {
     private static final String TAG = "YYJAPI";
     private static final String HOME_URL = "https://www.yyjapi.com";
     private static final String GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/%s/releases/latest";
-    private static final String GITHUB_DOWNLOAD_PROXY_PREFIX = "https://v4.gh-proxy.org/";
+    private static final String GITHUB_DOWNLOAD_PROXY_PREFIX = "https://ghfast.top/";
     private static final String UPDATE_APK_MIME_TYPE = "application/vnd.android.package-archive";
     private static final int[] RETRY_DELAYS_MS = { 1000, 2000, 4000, 8000, 15000, 30000 };
     private static final Set<String> APP_HOSTS = new HashSet<>(
